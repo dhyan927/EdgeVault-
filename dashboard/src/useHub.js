@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // Change this if the hub runs on another machine/port.
 export const HUB = "localhost:9000";
@@ -16,6 +16,8 @@ export function useHub(onEvent) {
   const [state, setState] = useState(null);
   const [log, setLog] = useState([]);
   const [connected, setConnected] = useState(false);
+  const [videoSources, setVideoSources] = useState([]);
+  const [videoSourcesError, setVideoSourcesError] = useState("");
   const wsRef = useRef(null);
   const onEventRef = useRef(onEvent);
 
@@ -56,15 +58,58 @@ export function useHub(onEvent) {
     };
   }, []);
 
-  const trigger = (path) => fetch(`http://${HUB}/trigger/${path}`, { method: "POST" });
-  const reportVideoEvent = async (event) => {
-    const response = await fetch(`http://${HUB}/event`, {
+  const request = useCallback(async (path, options) => {
+    const response = await fetch(`http://${HUB}${path}`, options);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || `Hub request failed (${response.status})`);
+    }
+    return response.json();
+  }, []);
+
+  const refreshVideoSources = useCallback(async () => {
+    try {
+      const sources = await request("/video_sources");
+      setVideoSources(sources);
+      setVideoSourcesError("");
+      return sources;
+    } catch (error) {
+      setVideoSourcesError(error.message);
+      throw error;
+    }
+  }, [request]);
+
+  useEffect(() => {
+    refreshVideoSources().catch((error) => {
+      console.error("Could not load video sources:", error);
+    });
+  }, [refreshVideoSources]);
+
+  const trigger = useCallback((path) => request(`/trigger/${path}`, { method: "POST" }), [request]);
+  const setVideoSource = useCallback((cam, video) => request("/camera_video", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cam, video }),
+  }), [request]);
+  const uploadVideo = useCallback(async (file) => {
+    const result = await request(`/video_sources?filename=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    await refreshVideoSources();
+    return result;
+  }, [refreshVideoSources, request]);
+  const reportVideoFrames = useCallback(async (cam, frames) => {
+    await request("/camera_analysis", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(event),
+      body: JSON.stringify({ cam, frames }),
     });
-    if (!response.ok) throw new Error(`Hub rejected video event (${response.status})`);
-  };
+  }, [request]);
 
-  return { state, log, connected, trigger, reportVideoEvent };
+  return {
+    state, log, connected, trigger, videoSources, videoSourcesError,
+    setVideoSource, uploadVideo, reportVideoFrames,
+  };
 }

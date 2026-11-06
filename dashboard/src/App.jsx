@@ -3,17 +3,11 @@ import { useHub, HUB } from "./useHub.js";
 
 // ---------- settings you can edit ----------
 const USER = { name: "Siddharth", role: "Operator" };  // shown top right
-const CRITICAL_SCORE = 0.8;          // threat score at or above this = critical pop-up
+const CRITICAL_SCORE = 0.7;          // suspicious-activity score at or above this = critical pop-up
 const MUTE_AFTER_DISMISS_MS = 8000;  // no repeat pop-up for the same camera right after "Acknowledge"
 const NOTABLE_SCORE = 0.4;           // timeline ignores perceive/reason events scored below this
 const RANGES = [3, 10, 30];          // timeline ranges (minutes) offered on the Timeline tab
 const ASSUMED_MB_PER_DAY = 10;       // PROJECTED retention assumes each camera keeps this much important footage per day
-const VIDEO_ANNOTATIONS = [
-  { type: "perceive", msg: "Demo clip: hallway is empty; no person visible yet.", score: 0.05 },
-  { type: "perceive", msg: "Demo clip: one person enters the hallway and walks down the corridor.", score: 0.45 },
-  { type: "reason", msg: "Demo analysis: person continues walking; no overt suspicious action is visible. Classified as routine movement.", score: 0.18 },
-];
-const VIDEO_STAGE_TIMES = { cam4: [1.5, 5] };
 
 const TYPE_LABEL = {
   perceive: "PERCEIVE",
@@ -27,7 +21,7 @@ const TYPE_LABEL = {
   offline: "OFFLINE",
 };
 
-const STATUS_LABEL = { calm: "Nominal", alert: "Alert", full: "Disk full", offline: "Offline" };
+const STATUS_LABEL = { calm: "Nominal", watch: "Review", alert: "Suspicious", full: "Disk full", offline: "Offline" };
 
 // "cam1" -> "CAM-01"
 function fmtCam(id) {
@@ -37,7 +31,7 @@ function fmtCam(id) {
 function isCritical(e) {
   // a failed audit is always critical
   if (e.type === "audit" && /fail/i.test(e.msg || "")) return true;
-  // a high threat score is critical
+  // a high suspicious-activity score is critical
   return (
     ["perceive", "reason", "alert"].includes(e.type) &&
     e.score != null &&
@@ -195,7 +189,7 @@ function CriticalAlert({ alert, camName, onClose }) {
           <span>CRITICAL ALERT</span>
           <span className="alert-ts">{alert.ts}</span>
         </div>
-        <h3 id="alert-title">Critical threat detected</h3>
+        <h3 id="alert-title">Suspicious activity detected</h3>
         <dl className="alert-dl">
           <div><dt>Source</dt><dd>{fmtCam(alert.cam)}{camName ? ` | ${camName.toUpperCase()}` : ""}</dd></div>
           {alert.score != null && <div><dt>Threat score</dt><dd className="hot">{alert.score.toFixed(2)}</dd></div>}
@@ -284,16 +278,89 @@ function Header({ tab, setTab, connected, bell, nodes }) {
 }
 
 /* ---------- simulation controls (collapsible) ---------- */
-function ControlBar({ trigger }) {
+function ControlBar({
+  trigger, camIds, cams, selectedCam, setSelectedCam, selectedVideo, setSelectedVideo,
+  videoSources, videoSourcesError, setVideoSource, uploadVideo,
+}) {
+  const cam = selectedCam === "all" ? null : cams[selectedCam];
+  const [message, setMessage] = useState("");
+
+  const run = async (action, successMessage) => {
+    setMessage("");
+    try {
+      await action();
+      if (successMessage) setMessage(successMessage);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  };
+
+  const handleUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    await run(async () => {
+      const source = await uploadVideo(file);
+      setSelectedVideo(source.name);
+    }, "Video added. Select “Use video” to apply it.");
+    event.target.value = "";
+  };
+
   return (
     <div className="ctl" role="group" aria-label="Simulation controls">
       <span className="ctl-label">Simulation</span>
-      <button className="btn btn-primary" onClick={() => trigger("intruder?cam=cam1")}>Trigger intruder · CAM-01</button>
-      <button className="btn" onClick={() => trigger("disk_full?cam=cam1")}>Fill disk · CAM-01</button>
-      <button className="btn" onClick={() => trigger("toggle/cam3")}>Toggle CAM-03 link</button>
+      <label className="ctl-camera-label" htmlFor="simulation-camera">Camera</label>
+      <select
+        id="simulation-camera"
+        className="ctl-select"
+        value={selectedCam}
+        onChange={(event) => {
+          const nextCam = event.target.value;
+          setSelectedCam(nextCam);
+          const names = nextCam === "all" ? camIds.map((id) => cams[id]?.video_name) : [cams[nextCam]?.video_name];
+          setSelectedVideo(names.length && names.every((name) => name === names[0]) ? names[0] : "");
+        }}
+        disabled={camIds.length === 0}
+      >
+        <option value="all">All cameras</option>
+        {camIds.map((id) => (
+          <option key={id} value={id}>{fmtCam(id)} · {cams[id]?.name || id}</option>
+        ))}
+      </select>
+      <label className="ctl-camera-label" htmlFor="simulation-video">Video</label>
+      <select
+        id="simulation-video"
+        className="ctl-select"
+        value={selectedVideo}
+        onChange={(event) => setSelectedVideo(event.target.value)}
+      >
+        <option value="">Choose a video…</option>
+        {videoSources.map((source) => (
+          <option key={source.name} value={source.name}>{source.name} · {source.size_mb} MB</option>
+        ))}
+      </select>
+      <button
+        className="btn btn-primary"
+        disabled={!selectedVideo || !camIds.length}
+        onClick={() => run(() => setVideoSource(selectedCam, selectedVideo), `Video applied to ${selectedCam === "all" ? "all cameras" : fmtCam(selectedCam)}.`)}
+      >
+        Use video
+      </button>
+      <label className="btn file-btn">
+        Add video
+        <input type="file" accept="video/mp4,video/webm,video/quicktime,video/x-m4v" onChange={handleUpload} />
+      </label>
+      <button className="btn" onClick={() => run(() => trigger(`disk_full?cam=${selectedCam}`))}>
+        Fill disk{selectedCam === "all" ? " · all" : ` · ${fmtCam(selectedCam)}`}
+      </button>
+      <button className="btn" onClick={() => run(() => trigger(`toggle/${selectedCam}`))}>
+        Toggle link{selectedCam === "all" ? " · all" : ` · ${fmtCam(selectedCam)}`}
+      </button>
       <span className="ctl-spacer" />
-      <span className="ctl-note">Affects hub state. Per-camera actions: right-click a feed or use its menu.</span>
-      <button className="btn btn-outline-danger" onClick={() => trigger("reset")}>Reset hub</button>
+      <span className="ctl-note">Gemini reviews sampled frames. Configure GEMINI_API_KEY, restart the hub, then reload this page.</span>
+      <button className="btn btn-outline-danger" onClick={() => run(() => trigger("reset"))}>Reset hub</button>
+      {(message || videoSourcesError) && (
+        <span className="ctl-feedback" role="status">{message || videoSourcesError}</span>
+      )}
     </div>
   );
 }
@@ -304,7 +371,7 @@ function MetricsStrip({ state }) {
   const onlineCams = cams.filter((c) => c.online);
   const online = onlineCams.length;
   const offline = cams.length - online;
-  const alerts = onlineCams.filter((c) => c.status === "alert").length;
+  const alerts = onlineCams.filter((c) => c.threat_level === "critical").length;
   const hosted = Object.values(state.stored_for_others).reduce((a, b) => a + b, 0);
   const hostNodes = Object.values(state.stored_for_others).filter((v) => v > 0).length;
   const totalCap = onlineCams.reduce((a, c) => a + c.capacity_mb, 0);
@@ -312,7 +379,7 @@ function MetricsStrip({ state }) {
 
   const items = [
     { label: "Cameras online", value: `${online}/${cams.length}`, sub: offline ? `${offline} node${offline > 1 ? "s" : ""} offline` : "all nodes reporting", tone: offline ? "warn" : "lime" },
-    { label: "Active alerts", value: alerts, sub: alerts ? "attention required" : "no active threats", tone: alerts ? "danger" : "ok" },
+    { label: "Suspicious cameras", value: alerts, sub: alerts ? "review these camera feeds" : "no suspicious activity detected", tone: alerts ? "danger" : "ok" },
     { label: "Clips on peers", value: hosted, unit: "MB", sub: `${hostNodes} hosting node${hostNodes === 1 ? "" : "s"}`, tone: "violet" },
     { label: "Network free space", value: free, unit: "MB", sub: `of ${totalCap} MB online capacity`, tone: "teal" },
   ];
@@ -331,9 +398,13 @@ function MetricsStrip({ state }) {
 }
 
 /* ---------- camera card: monitor on top, telemetry below, actions in a menu ---------- */
-function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onIntruder, onDiskFull, reportVideoEvent }) {
+function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onDiskFull, reportVideoFrames }) {
   const feedRef = useRef(null);
-  const videoStageRef = useRef(-1);
+  const videoRef = useRef(null);
+  const sampledFramesRef = useRef([]);
+  const analysisPendingRef = useRef(false);
+  const [analysisError, setAnalysisError] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
   const [menu, setMenu] = useState(null);
 
   const pct = Math.round((cam.used_mb / cam.capacity_mb) * 100);
@@ -366,15 +437,50 @@ function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onIntruder
     });
   };
   const run = (fn) => () => { setMenu(null); fn(); };
-  const reportVideoStage = (event) => {
-    const [personAt, reasoningAt] = VIDEO_STAGE_TIMES[id] || [3, 6];
-    const stage = event.currentTarget.currentTime < personAt ? 0 : event.currentTarget.currentTime < reasoningAt ? 1 : 2;
-    if (stage === videoStageRef.current) return;
-    videoStageRef.current = stage;
-    reportVideoEvent({ cam: id, ...VIDEO_ANNOTATIONS[stage] }).catch((error) => {
-      console.error("Could not send video annotation to hub:", error);
-    });
-  };
+  useEffect(() => {
+    sampledFramesRef.current = [];
+    analysisPendingRef.current = false;
+    setAnalysisError("");
+    if (!cam.online || !cam.video_url) return undefined;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 180;
+    const context = canvas.getContext("2d");
+    if (!context) return undefined;
+
+    const timer = window.setInterval(() => {
+      const video = videoRef.current;
+      if (analysisPendingRef.current || !video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.paused) return;
+      try {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const jpeg = canvas.toDataURL("image/jpeg", 0.65).split(",", 2)[1];
+        sampledFramesRef.current.push(jpeg);
+        if (sampledFramesRef.current.length < 3) return;
+
+        const frames = sampledFramesRef.current;
+        sampledFramesRef.current = [];
+        analysisPendingRef.current = true;
+        setAnalyzing(true);
+        reportVideoFrames(id, frames).then(() => {
+          setAnalysisError("");
+        }).catch((error) => {
+          setAnalysisError(error.message);
+          window.clearInterval(timer);
+          console.error(`Could not analyze the ${fmtCam(id)} video:`, error);
+        }).finally(() => {
+          analysisPendingRef.current = false;
+          setAnalyzing(false);
+        });
+      } catch (error) {
+        setAnalysisError(error.message);
+        window.clearInterval(timer);
+        console.error(`Could not capture frames from the ${fmtCam(id)} video:`, error);
+      }
+    }, 4000);
+
+    return () => window.clearInterval(timer);
+  }, [cam.online, cam.video_url, id, reportVideoFrames]);
 
   return (
     <div className={`card status-${status}`}>
@@ -384,7 +490,7 @@ function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onIntruder
         onContextMenu={(e) => { e.preventDefault(); openMenu(e.clientX, e.clientY); }}
       >
         {cam.online && cam.video_url ? (
-          <video src={cam.video_url} autoPlay muted loop playsInline onTimeUpdate={reportVideoStage} />
+          <video key={cam.video_url} ref={videoRef} src={cam.video_url} crossOrigin="anonymous" autoPlay muted loop playsInline />
         ) : cam.online && cam.thumb_url ? (
           <img src={cam.thumb_url} alt={`${fmtCam(id)} feed`} />
         ) : (
@@ -414,7 +520,11 @@ function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onIntruder
 
         <div className="feed-bottom">
           <span className={`badge badge-${status}`}><i />{STATUS_LABEL[status] || status}</span>
-          {cam.online && <FeedTime />}
+          {analysisError
+            ? <span className="analysis-error" title={analysisError}>AI analysis unavailable</span>
+            : analyzing
+              ? <span className="analysis-pending">Analyzing frames…</span>
+              : cam.online && <FeedTime />}
         </div>
 
         {menu && (
@@ -422,7 +532,6 @@ function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onIntruder
             <div className="ctx-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
             <div className="ctx" role="menu" style={{ left: menu.x, top: menu.y }}>
               <div className="ctx-head">{fmtCam(id)} · Manual actions</div>
-              <button role="menuitem" className="ctx-item" disabled={!cam.online} onClick={run(onIntruder)}>Simulate intruder</button>
               <button role="menuitem" className="ctx-item" disabled={!cam.online} onClick={run(onDiskFull)}>Fill disk to 95%</button>
               <div className="ctx-sep" />
               <button role="menuitem" className={`ctx-item ${cam.online ? "danger" : ""}`} onClick={run(onToggle)}>
@@ -434,6 +543,7 @@ function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onIntruder
       </div>
 
       <div className="card-body">
+        {analysisError && <p className="analysis-error-details" role="status">{analysisError}</p>}
         <div className="row">
           <span>STORAGE</span>
           <span className="mono">{cam.used_mb} / {cam.capacity_mb} MB · {pct}%</span>
@@ -449,8 +559,10 @@ function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onIntruder
 
         <div className="tele">
           <div>
-            <span className="tele-label">Last threat</span>
-            <b className={cam.last_score >= CRITICAL_SCORE ? "hot" : ""}>{cam.last_score.toFixed(2)}</b>
+            <span className="tele-label">Threat score</span>
+            <b className={cam.last_score != null && cam.last_score >= CRITICAL_SCORE ? "hot" : ""}>
+              {cam.last_score == null ? "—" : cam.last_score.toFixed(2)}
+            </b>
           </div>
           <div>
             <span className="tele-label">Credits</span>
@@ -466,6 +578,7 @@ function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onIntruder
             </b>
           </div>
         </div>
+        {cam.analysis_reason && <p className="analysis-reason">{cam.analysis_reason}</p>}
       </div>
     </div>
   );
@@ -712,6 +825,8 @@ function Skeleton({ connected }) {
 export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [showCtl, setShowCtl] = useState(false);
+  const [selectedCam, setSelectedCam] = useState("all");
+  const [selectedVideo, setSelectedVideo] = useState("");
   const [critical, setCritical] = useState(null);
   const [incidents, setIncidents] = useState([]);
   const [unread, setUnread] = useState(0);
@@ -745,7 +860,10 @@ export default function App() {
     setCritical(null);
   }, []);
 
-  const { state, log, connected, trigger, reportVideoEvent } = useHub(handleEvent);
+  const {
+    state, log, connected, trigger, videoSources, videoSourcesError,
+    setVideoSource, uploadVideo, reportVideoFrames,
+  } = useHub(handleEvent);
   const camIds = state ? Object.keys(state.cams) : [];
 
   const online = state ? Object.values(state.cams).filter((c) => c.online).length : 0;
@@ -791,7 +909,21 @@ export default function App() {
           </button>
         </div>
 
-        {showCtl && <ControlBar trigger={trigger} />}
+        {showCtl && state && (
+          <ControlBar
+            trigger={trigger}
+            camIds={camIds}
+            cams={state.cams}
+            selectedCam={selectedCam === "all" || camIds.includes(selectedCam) ? selectedCam : "all"}
+            setSelectedCam={setSelectedCam}
+            selectedVideo={selectedVideo}
+            setSelectedVideo={setSelectedVideo}
+            videoSources={videoSources}
+            videoSourcesError={videoSourcesError}
+            setVideoSource={setVideoSource}
+            uploadVideo={uploadVideo}
+          />
+        )}
 
         {!state ? (
           <Skeleton connected={connected} />
@@ -815,9 +947,8 @@ export default function App() {
                       hosted={state.stored_for_others[id]}
                       peerFreeMb={peerFreeMb}
                       onToggle={() => trigger(`toggle/${id}`)}
-                      onIntruder={() => trigger(`intruder?cam=${id}`)}
                       onDiskFull={() => trigger(`disk_full?cam=${id}`)}
-                      reportVideoEvent={reportVideoEvent}
+                      reportVideoFrames={reportVideoFrames}
                     />
                   );
                 })}

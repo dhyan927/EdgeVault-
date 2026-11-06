@@ -7,19 +7,29 @@ their events to /event and this file keeps working as the real hub.
 
 Run:  python server.py          (listens on http://localhost:9000)
 """
+import base64
 import asyncio
 import random
+import sys
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 CAPACITY_MB = 100
+MAX_VIDEO_BYTES = 100 * 1024 * 1024
+VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".m4v"}
 CAMS = ["cam1", "cam2", "cam3", "cam4"]
 CAM_NAMES = {"cam1": "Front Door", "cam2": "Hallway", "cam3": "Server Room", "cam4": "Parking"}
-VIDEO_DIR = Path(__file__).resolve().parent.parent / "videos"
+VIDEO_DIR = ROOT_DIR / "videos"
 CAM_VIDEOS = {
     "cam1": "hallway.mp4",
     "cam2": "normal.mp4",
@@ -35,8 +45,10 @@ app.mount("/videos", StaticFiles(directory=VIDEO_DIR), name="videos")
 state = {
     "cams": {
         c: {"name": CAM_NAMES[c], "online": True, "used_mb": random.randint(15, 40),
-            "capacity_mb": CAPACITY_MB, "last_score": 0.1, "status": "calm",
-            "video_url": f"http://localhost:9000/videos/{CAM_VIDEOS[c]}"}
+            "capacity_mb": CAPACITY_MB, "last_score": None, "status": "calm",
+            "threat_level": "low", "video_name": CAM_VIDEOS[c],
+            "video_url": f"http://localhost:9000/videos/{CAM_VIDEOS[c]}",
+            "video_size_mb": round((VIDEO_DIR / CAM_VIDEOS[c]).stat().st_size / 1e6, 2)}
         for c in CAMS
     },
     "ledger": {c: 100.0 for c in CAMS},       # fake credits
@@ -45,6 +57,12 @@ state = {
 log = []            # last events
 clients = set()     # connected websockets
 clip_counter = 0
+auctioned_cameras = set()
+
+
+class VideoAnalysis(BaseModel):
+    cam: str
+    frames: list[str] = Field(min_length=3, max_length=3)
 
 
 async def broadcast(kind, data):
@@ -74,68 +92,85 @@ def next_clip():
     return f"c{clip_counter}"
 
 
-# ---------- scripted scenarios ----------
-async def intruder(cam="cam1"):
-    c = state["cams"][cam]
+# ---------- video analysis and storage auction ----------
+def threat_level(score):
+    if score >= 0.7:
+        return "critical"
+    if score >= 0.3:
+        return "watch"
+    return "low"
+
+
+async def auction_video(cam, score):
+    camera = state["cams"][cam]
     clip = next_clip()
-    c["status"] = "alert"
-    c["last_score"] = 0.91
-    await emit(cam, "perceive", f"{clip}: simulated threat trigger on hallway footage", 0.91)
-    await asyncio.sleep(0.8)
-    await emit(cam, "reason", f"Gemini: threat 0.91. Disk {c['used_mb']}% full. Decision: keep clip", 0.91)
-    await asyncio.sleep(0.8)
+    size_mb = camera["video_size_mb"]
+    await emit(cam, "reason", f"{clip}: suspicious-activity score {score:.2f}; local storage above 80%, requesting peer bids", score)
 
-    if c["used_mb"] < 85:
-        c["used_mb"] += 20
-        await emit(cam, "alert", f"{clip}: stored locally (+20 MB)", 0.91)
-        return
-
-    await emit(cam, "reason", "Disk nearly full. Calling auction_remote_storage", 0.91)
-    peers = [p for p in CAMS if p != cam and state["cams"][p]["online"]]
     bids = {}
-    for p in peers:
-        free = CAPACITY_MB - state["cams"][p]["used_mb"]
-        if free >= 20:
-            bids[p] = round(random.uniform(0.8, 2.0), 2)
-            await emit(p, "bid", f"Bid {bids[p]} credits for {clip} ({free} MB free)", cam_from=cam)
-            await asyncio.sleep(0.5)
+    for peer in CAMS:
+        if peer == cam or not state["cams"][peer]["online"]:
+            continue
+        peer_state = state["cams"][peer]
+        free_mb = max(0, peer_state["capacity_mb"] - peer_state["used_mb"])
+        if free_mb < size_mb:
+            continue
+        ask_price = round(0.5 + 2.0 * peer_state["used_mb"] / peer_state["capacity_mb"], 2)
+        bids[peer] = ask_price
+        await emit(peer, "bid", f"Bid {ask_price:.2f} credits for {clip} ({free_mb:.2f} MB free)", score, cam_from=cam)
+
     if not bids:
-        c["status"] = "alert"
-        await emit(cam, "compress", f"{clip}: no peer has space, compressed 50%", 0.91)
+        camera["used_mb"] = max(0, camera["used_mb"] - size_mb / 2)
+        camera["status"] = "full" if camera["used_mb"] >= camera["capacity_mb"] * 0.9 else "alert"
+        await emit(cam, "compress", f"{clip}: no peer had enough space; retained at half size", score)
         return
 
     winner = min(bids, key=bids.get)
     price = bids[winner]
-    await emit(cam, "transfer", f"{clip}: encrypted and sent to {winner} for {price} credits", 0.91, to=winner)
-    state["cams"][cam]["used_mb"] = max(0, c["used_mb"] - 20)
-    state["cams"][winner]["used_mb"] += 20
-    state["stored_for_others"][winner] += 20
+    camera["used_mb"] = max(0, camera["used_mb"] - size_mb)
+    camera["status"] = "full" if camera["used_mb"] >= camera["capacity_mb"] * 0.9 else "alert"
+    state["cams"][winner]["used_mb"] += size_mb
+    state["stored_for_others"][winner] += size_mb
     state["ledger"][cam] = round(state["ledger"][cam] - price, 2)
     state["ledger"][winner] = round(state["ledger"][winner] + price, 2)
-    await emit(winner, "audit", f"Audit scheduled for {clip} (hash challenge in 10 s)")
-    await asyncio.sleep(2)
-    await emit(winner, "audit", f"{clip}: hash proof PASSED")
+    await emit(cam, "transfer", f"{clip}: {size_mb:.2f} MB stored on {winner} for {price:.2f} credits", score, to=winner)
+    await emit(winner, "audit", f"Audit scheduled for {clip}")
+    await emit(winner, "audit", f"{clip}: storage proof passed")
 
 
 async def disk_full(cam="cam1"):
-    state["cams"][cam]["used_mb"] = 95
-    state["cams"][cam]["status"] = "full"
-    await emit(cam, "alert", "Storage at 95%")
+    cameras = CAMS if cam == "all" else [cam]
+    for camera_id in cameras:
+        if camera_id not in state["cams"]:
+            raise HTTPException(status_code=404, detail=f"Unknown camera: {camera_id}")
+        state["cams"][camera_id]["used_mb"] = 95
+        state["cams"][camera_id]["status"] = "full"
+        await emit(camera_id, "alert", "Storage at 95%")
 
 
 async def toggle_cam(cam):
-    c = state["cams"][cam]
-    c["online"] = not c["online"]
-    c["status"] = "calm" if c["online"] else "offline"
-    await emit(cam, "offline" if not c["online"] else "alert",
-               "Camera went OFFLINE" if not c["online"] else "Camera back ONLINE")
+    cameras = CAMS if cam == "all" else [cam]
+    for camera_id in cameras:
+        if camera_id not in state["cams"]:
+            raise HTTPException(status_code=404, detail=f"Unknown camera: {camera_id}")
+        c = state["cams"][camera_id]
+        c["online"] = not c["online"]
+        c["status"] = (
+            "offline" if not c["online"] else
+            "full" if c["used_mb"] >= c["capacity_mb"] * 0.9 else
+            "alert" if c.get("threat_level") == "critical" else
+            "watch" if c.get("threat_level") == "watch" else "calm"
+        )
+        await emit(camera_id, "offline" if not c["online"] else "alert",
+                   "Camera went OFFLINE" if not c["online"] else "Camera back ONLINE")
 
 
 async def reset():
     for c in CAMS:
-        state["cams"][c].update(online=True, used_mb=random.randint(15, 40), last_score=0.1, status="calm")
+        state["cams"][c].update(online=True, used_mb=random.randint(15, 40), last_score=None, status="calm", threat_level="low")
         state["ledger"][c] = 100.0
         state["stored_for_others"][c] = 0
+    auctioned_cameras.clear()
     log.clear()
     await broadcast("state", state)
     await emit("hub", "alert", "Demo reset")
@@ -147,10 +182,57 @@ def get_state():
     return {"state": state, "log": log}
 
 
-@app.post("/trigger/intruder")
-async def trigger_intruder(cam: str = "cam1"):
-    asyncio.create_task(intruder(cam))
-    return {"ok": True}
+@app.get("/video_sources")
+def get_video_sources():
+    return [
+        {"name": path.name, "size_mb": round(path.stat().st_size / 1e6, 2)}
+        for path in sorted(VIDEO_DIR.iterdir())
+        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+    ]
+
+
+@app.post("/video_sources")
+async def upload_video(request: Request, filename: str):
+    if Path(filename).name != filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Use a plain video filename")
+    if Path(filename).suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported video format")
+    contents = await request.body()
+    if not contents:
+        raise HTTPException(status_code=400, detail="The uploaded video is empty")
+    if len(contents) > MAX_VIDEO_BYTES:
+        raise HTTPException(status_code=413, detail="Videos must be 100 MB or smaller")
+    destination = VIDEO_DIR / filename
+    if destination.exists():
+        raise HTTPException(status_code=409, detail="A video with that filename already exists")
+    destination.write_bytes(contents)
+    return {"name": filename, "size_mb": round(len(contents) / 1e6, 2)}
+
+
+@app.post("/camera_video")
+async def select_camera_video(body: dict):
+    cam = body.get("cam")
+    filename = body.get("video")
+    if cam != "all" and cam not in state["cams"]:
+        raise HTTPException(status_code=404, detail=f"Unknown camera: {cam}")
+    if not isinstance(filename, str) or Path(filename).name != filename or Path(filename).suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Choose a valid video source")
+    video_path = VIDEO_DIR / filename
+    if not video_path.is_file():
+        raise HTTPException(status_code=404, detail="Video source not found")
+
+    targets = CAMS if cam == "all" else [cam]
+    video_url = f"http://localhost:9000/videos/{filename}"
+    for camera_id in targets:
+        camera = state["cams"][camera_id]
+        camera.update(video_name=filename, video_url=video_url, video_size_mb=round(video_path.stat().st_size / 1e6, 2))
+        camera["last_score"] = None
+        camera["threat_level"] = "low"
+        camera.pop("analysis_reason", None)
+        camera["status"] = "full" if camera["online"] and camera["used_mb"] >= camera["capacity_mb"] * 0.9 else ("calm" if camera["online"] else "offline")
+        auctioned_cameras.discard(camera_id)
+        await emit(camera_id, "reason", f"Video source changed to {filename}; analyzing live frames")
+    return {"ok": True, "cameras": targets}
 
 
 @app.post("/trigger/disk_full")
@@ -163,6 +245,64 @@ async def trigger_disk_full(cam: str = "cam1"):
 async def trigger_toggle(cam: str):
     await toggle_cam(cam)
     return {"ok": True}
+
+
+@app.post("/camera_analysis")
+async def analyze_camera_video(analysis: VideoAnalysis):
+    if analysis.cam not in state["cams"]:
+        raise HTTPException(status_code=404, detail=f"Unknown camera: {analysis.cam}")
+    camera = state["cams"][analysis.cam]
+    if not camera["online"]:
+        return {"ok": False, "error": "Camera is offline"}
+
+    for frame in analysis.frames:
+        if len(frame) > 700_000:
+            raise HTTPException(status_code=413, detail="Each analyzed frame must be smaller than 512 KB")
+        try:
+            decoded = base64.b64decode(frame, validate=True)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Frames must be base64-encoded JPEG images") from error
+        if not decoded or len(decoded) > 512 * 1024:
+            raise HTTPException(status_code=413, detail="Each analyzed frame must be smaller than 512 KB")
+
+    context = {
+        "camera_name": camera["name"],
+        "is_restricted": analysis.cam == "cam3",
+        "disk_percent": round(100 * camera["used_mb"] / camera["capacity_mb"], 1),
+    }
+    try:
+        from scorer import score_video_frames
+    except ImportError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini scoring is unavailable. Install google-genai and python-dotenv.",
+        ) from error
+    try:
+        result = await run_in_threadpool(score_video_frames, analysis.frames, context)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Gemini video analysis failed: {error}") from error
+
+    score = round(result["score"], 2)
+    reason = result["reason"]
+    level = threat_level(score)
+    previous_score = camera["last_score"]
+    previous_level = camera.get("threat_level", "low")
+    camera["last_score"] = score
+    camera["analysis_reason"] = reason
+    camera["threat_level"] = level
+    camera["status"] = "full" if camera["used_mb"] >= 90 else ("alert" if level == "critical" else ("watch" if level == "watch" else "calm"))
+    await broadcast("state", state)
+
+    if level != previous_level or previous_score is None or abs(score - previous_score) >= 0.1:
+        clip = next_clip()
+        await emit(analysis.cam, "reason", f"{clip}: threat score {score:.2f} ({level}). {reason}", score)
+
+    if level != "critical":
+        auctioned_cameras.discard(analysis.cam)
+    elif camera["used_mb"] / camera["capacity_mb"] >= 0.8 and analysis.cam not in auctioned_cameras:
+        auctioned_cameras.add(analysis.cam)
+        await auction_video(analysis.cam, score)
+    return {"ok": True, "score": score, "level": level}
 
 
 @app.post("/trigger/reset")
