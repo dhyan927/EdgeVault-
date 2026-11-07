@@ -352,6 +352,9 @@ function ControlBar({
       <button className="btn" onClick={() => run(() => trigger(`disk_full?cam=${selectedCam}`))}>
         Fill disk{selectedCam === "all" ? " · all" : ` · ${fmtCam(selectedCam)}`}
       </button>
+      <button className="btn" onClick={() => run(() => trigger(`auction?cam=${selectedCam}`), "Auction started. Watch the agent log.")}>
+  Run auction{selectedCam === "all" ? " · all" : ` · ${fmtCam(selectedCam)}`}
+   </button>
       <button className="btn" onClick={() => run(() => trigger(`toggle/${selectedCam}`))}>
         Toggle link{selectedCam === "all" ? " · all" : ` · ${fmtCam(selectedCam)}`}
       </button>
