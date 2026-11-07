@@ -53,7 +53,7 @@ state = {
             "capacity_mb": CAPACITY_MB, "last_score": None, "status": "calm",
             "threat_level": "low", "video_name": CAM_VIDEOS[c],
             "video_url": f"http://localhost:9000/videos/{CAM_VIDEOS[c]}",
-            "video_size_mb": round((VIDEO_DIR / CAM_VIDEOS[c]).stat().st_size / 1e6, 2)}
+            "video_size_mb": (VIDEO_DIR / CAM_VIDEOS[c]).stat().st_size / 1e6}
         for c in CAMS
     },
     "ledger": {c: 100.0 for c in CAMS},       # fake credits
@@ -106,29 +106,34 @@ def threat_level(score):
     return "low"
 
 
-def _store_on_peer(owner, peer, clip, video_name):
+def _store_on_peer(owner, peer, clip, video_name, available_bytes):
     """Really store `owner`'s clip on `peer`'s disk, then audit it."""
     from camera.crypto import VaultCrypto   # needs: pip install cryptography
 
     KEY_DIR.mkdir(exist_ok=True)
-    blob = VaultCrypto(str(KEY_DIR / f"{owner}_key.bin")).encrypt((VIDEO_DIR / video_name).read_bytes())
+    video_bytes = (VIDEO_DIR / video_name).read_bytes()
+    blob = VaultCrypto(str(KEY_DIR / f"{owner}_key.bin")).encrypt(video_bytes)
+    if len(blob) > available_bytes:
+        raise ValueError("Insufficient storage capacity")
 
     dest_dir = STORAGE_DIR / peer / f"stored_for_{owner}"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{clip}.bin"
-    dest.write_bytes(blob)
+    with dest.open("xb") as stored_file:
+        stored_file.write(blob)
 
     nonce = secrets.token_hex(16).encode("utf-8")
     expected = hashlib.sha256(nonce + blob).hexdigest()
     proof = hashlib.sha256(nonce + dest.read_bytes()).hexdigest()
-    return {"path": dest, "size_mb": round(len(blob) / 1e6, 2), "audit_ok": proof == expected}
+    return {"path": dest, "size_mb": len(blob) / 1e6, "audit_ok": proof == expected}
 
 
 async def auction_video(cam, score=None):
-    """score=None means the auction was started manually (not by a Gemini score)."""
+    """Auction a clip when the camera's local storage is running low."""
     camera = state["cams"][cam]
     clip = next_clip()
-    size_mb = camera["video_size_mb"]
+    video_bytes = (VIDEO_DIR / camera["video_name"]).stat().st_size
+    size_mb = video_bytes / 1e6
     if score is None:
         await emit(cam, "reason", f"{clip}: local storage above 80%, requesting peer bids")
     else:
@@ -139,9 +144,13 @@ async def auction_video(cam, score=None):
         if peer == cam or not state["cams"][peer]["online"]:
             continue
         peer_state = state["cams"][peer]
-        free_mb = max(0, peer_state["capacity_mb"] - peer_state["used_mb"])
-        if free_mb < size_mb:
+        free_bytes = max(
+            0,
+            int(peer_state["capacity_mb"] * 1e6) - int(peer_state["used_mb"] * 1e6),
+        )
+        if free_bytes < video_bytes + 28:
             continue
+        free_mb = free_bytes / 1e6
         ask_price = round(0.5 + 2.0 * peer_state["used_mb"] / peer_state["capacity_mb"], 2)
         bids[peer] = ask_price
         await emit(peer, "bid", f"Bid {ask_price:.2f} credits for {clip} ({free_mb:.2f} MB free)", score, cam_from=cam)
@@ -150,7 +159,14 @@ async def auction_video(cam, score=None):
     stored = None
     for winner in sorted(bids, key=bids.get):
         try:
-            result = await run_in_threadpool(_store_on_peer, cam, winner, clip, camera["video_name"])
+            peer_state = state["cams"][winner]
+            free_bytes = max(
+                0,
+                int(peer_state["capacity_mb"] * 1e6) - int(peer_state["used_mb"] * 1e6),
+            )
+            result = await run_in_threadpool(
+                _store_on_peer, cam, winner, clip, camera["video_name"], free_bytes
+            )
         except Exception as error:
             await emit(winner, "alert", f"{clip}: could not store the clip for {cam}: {error}")
             continue
@@ -161,23 +177,38 @@ async def auction_video(cam, score=None):
         break
 
     if stored is None:
-        camera["used_mb"] = round(max(0, camera["used_mb"] - size_mb / 2), 2)
-        camera["status"] = "full" if camera["used_mb"] >= camera["capacity_mb"] * 0.9 else "alert"
-        await emit(cam, "compress", f"{clip}: no peer could store it; retained at half size", score)
+        await emit(cam, "alert", f"{clip}: no peer could store the clip; it remains on local storage", score)
         return
 
     winner, price, result = stored
     stored_mb = result["size_mb"]
-    camera["used_mb"] = round(max(0, camera["used_mb"] - stored_mb), 2)
+    camera["used_mb"] = round(max(0, camera["used_mb"] - size_mb), 4)
     camera["status"] = "full" if camera["used_mb"] >= camera["capacity_mb"] * 0.9 else "alert"
-    state["cams"][winner]["used_mb"] = round(state["cams"][winner]["used_mb"] + stored_mb, 2)
-    state["stored_for_others"][winner] = round(state["stored_for_others"][winner] + stored_mb, 2)
+    peer_state = state["cams"][winner]
+    peer_state["used_mb"] = round(peer_state["used_mb"] + stored_mb, 4)
+    if peer_state["used_mb"] >= peer_state["capacity_mb"] * 0.9:
+        peer_state["status"] = "full"
+    state["stored_for_others"][winner] = round(state["stored_for_others"][winner] + stored_mb, 4)
     state["ledger"][cam] = round(state["ledger"][cam] - price, 2)
     state["ledger"][winner] = round(state["ledger"][winner] + price, 2)
     where = result["path"].relative_to(STORAGE_DIR.parent).as_posix()
     await emit(cam, "transfer", f"{clip}: {stored_mb:.2f} MB encrypted and stored on {winner} ({where}) for {price:.2f} credits", score, to=winner)
     await emit(winner, "audit", f"Audit scheduled for {clip}")
     await emit(winner, "audit", f"{clip}: storage proof passed")
+
+
+async def maybe_auction_camera(cam):
+    camera = state["cams"][cam]
+    if camera["used_mb"] / camera["capacity_mb"] < 0.8:
+        auctioned_cameras.discard(cam)
+        return
+    if not camera["online"] or cam in auctioned_cameras:
+        return
+
+    auctioned_cameras.add(cam)
+    score = camera.get("last_score") if camera.get("threat_level") == "critical" else None
+    await auction_video(cam, score)
+
 
 async def disk_full(cam="cam1"):
     cameras = CAMS if cam == "all" else [cam]
@@ -187,6 +218,7 @@ async def disk_full(cam="cam1"):
         state["cams"][camera_id]["used_mb"] = 95
         state["cams"][camera_id]["status"] = "full"
         await emit(camera_id, "alert", "Storage at 95%")
+        await maybe_auction_camera(camera_id)
 
 
 async def toggle_cam(cam):
@@ -204,6 +236,8 @@ async def toggle_cam(cam):
         )
         await emit(camera_id, "offline" if not c["online"] else "alert",
                    "Camera went OFFLINE" if not c["online"] else "Camera back ONLINE")
+        if c["online"]:
+            await maybe_auction_camera(camera_id)
 
 
 async def reset():
@@ -266,7 +300,7 @@ async def select_camera_video(body: dict):
     video_url = f"http://localhost:9000/videos/{filename}"
     for camera_id in targets:
         camera = state["cams"][camera_id]
-        camera.update(video_name=filename, video_url=video_url, video_size_mb=round(video_path.stat().st_size / 1e6, 2))
+        camera.update(video_name=filename, video_url=video_url, video_size_mb=video_path.stat().st_size / 1e6)
         camera["last_score"] = None
         camera["threat_level"] = "low"
         camera.pop("analysis_reason", None)
@@ -306,6 +340,8 @@ async def analyze_camera_video(analysis: VideoAnalysis):
         if not decoded or len(decoded) > 512 * 1024:
             raise HTTPException(status_code=413, detail="Each analyzed frame must be smaller than 512 KB")
 
+    await maybe_auction_camera(analysis.cam)
+
     context = {
         "camera_name": camera["name"],
         "is_restricted": analysis.cam == "cam3",
@@ -338,28 +374,8 @@ async def analyze_camera_video(analysis: VideoAnalysis):
         clip = next_clip()
         await emit(analysis.cam, "reason", f"{clip}: threat score {score:.2f} ({level}). {reason}", score)
 
-    if level != "critical":
-        auctioned_cameras.discard(analysis.cam)
-    elif camera["used_mb"] / camera["capacity_mb"] >= 0.8 and analysis.cam not in auctioned_cameras:
-        auctioned_cameras.add(analysis.cam)
-        await auction_video(analysis.cam, score)
+    await maybe_auction_camera(analysis.cam)
     return {"ok": True, "score": score, "level": level}
-
-@app.post("/trigger/auction")
-async def trigger_auction(cam: str = "cam1"):
-    """Demo button: fill the disk if needed, then run the storage auction now."""
-    cameras = CAMS if cam == "all" else [cam]
-    for camera_id in cameras:
-        if camera_id not in state["cams"]:
-            raise HTTPException(status_code=404, detail=f"Unknown camera: {camera_id}")
-    for camera_id in cameras:
-        camera = state["cams"][camera_id]
-        if not camera["online"]:
-            continue
-        if camera["used_mb"] < camera["capacity_mb"] * 0.8:
-            await disk_full(camera_id)
-        await auction_video(camera_id)
-    return {"ok": True}
 
 @app.post("/trigger/reset")
 async def trigger_reset():
@@ -390,6 +406,7 @@ async def camera_state(body: dict):
     if "hosted_mb" in body:
         state["stored_for_others"][cam] = body["hosted_mb"]
     await broadcast("state", state)
+    await maybe_auction_camera(cam)
     return {"ok": True}
 
 

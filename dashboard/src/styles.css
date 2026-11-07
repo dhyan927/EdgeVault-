@@ -84,13 +84,6 @@ body { margin: 0; min-height: 100vh; color: var(--text); background-color: var(-
   position: absolute; top: 9px; right: 8px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 2px;
   background: var(--danger); color: #fff; font-family: var(--mono); font-size: 10px; font-weight: 600; display: grid; place-items: center;
 }
-.sb-item.operator { gap: 10px; font-family: var(--sans); }
-.avatar { width: 26px; height: 26px; border-radius: 3px; display: grid; place-items: center; font-weight: 600; font-size: 12px;
-  background: linear-gradient(135deg, #4f46e5, #8b5cf6); border: 1px solid rgba(196, 181, 253, .4); color: #fff; }
-.user-text { display: flex; flex-direction: column; line-height: 1.1; }
-.user-text b { font-size: 12px; font-weight: 600; }
-.user-text small { font-size: 10px; color: var(--faint); letter-spacing: .06em; text-transform: uppercase; margin-top: 2px; }
-
 .bell-wrap { position: relative; display: flex; }
 .backdrop { position: fixed; inset: 0; z-index: 60; }
 .dropdown {
@@ -113,16 +106,20 @@ body { margin: 0; min-height: 100vh; color: var(--text); background-color: var(-
 .page-sub { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 
 .btn {
-  background: var(--panel-2); color: var(--text); border: 1px solid var(--line-strong);
-  padding: 5px 12px; border-radius: 3px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 500;
+  min-height: 34px; background: linear-gradient(180deg, #172139, #111a2c); color: var(--text);
+  border: 1px solid #354366; padding: 6px 13px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .22);
+  transition: background .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease;
 }
-.btn:hover:not(:disabled) { background: #17233a; border-color: #3a4d6b; }
+.btn:hover:not(:disabled) { background: linear-gradient(180deg, #202d49, #17233a); border-color: #586b98; box-shadow: 0 4px 12px rgba(0, 0, 0, .3); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
-.btn-primary { background: linear-gradient(180deg, #7566f5, #5b4de0); border-color: #7f71ff; color: #fff; }
-.btn-primary:hover:not(:disabled) { background: linear-gradient(180deg, #8174f7, #6759e6); border-color: #a9a0ff; }
-.btn-danger { background: #b91c1c; border-color: #dc2626; color: #fff; }
-.btn-danger:hover:not(:disabled) { background: #c92424; border-color: #ef4444; }
+.btn-primary { background: linear-gradient(180deg, #8174f7, #5b4de0); border-color: #988cff; color: #fff; box-shadow: 0 3px 12px rgba(109, 94, 240, .24); }
+.btn-primary:hover:not(:disabled) { background: linear-gradient(180deg, #9186ff, #6759e6); border-color: #c4b5fd; box-shadow: 0 5px 16px rgba(109, 94, 240, .36); }
+.btn-danger { background: linear-gradient(180deg, #dc3030, #b91c1c); border-color: #f05252; color: #fff; }
+.btn-danger:hover:not(:disabled) { background: linear-gradient(180deg, #ef4444, #c92424); border-color: #f87171; }
 .btn-outline-danger { background: transparent; color: #f87171; border-color: rgba(239, 68, 68, .45); }
 .btn-outline-danger:hover:not(:disabled) { background: rgba(239, 68, 68, .1); border-color: var(--danger); }
 .btn-wide { width: 100%; padding: 9px; font-size: 13px; }
@@ -146,7 +143,6 @@ body { margin: 0; min-height: 100vh; color: var(--text); background-color: var(-
 .file-btn input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 .ctl-feedback { flex-basis: 100%; color: var(--accent-2); font-size: 11px; }
 .ctl-spacer { flex: 1; }
-.ctl-note { font-size: 11px; color: var(--faint); }
 
 /* ================= metrics strip ================= */
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); margin-bottom: 14px; overflow: hidden;
@@ -438,6 +434,5 @@ body { margin: 0; min-height: 100vh; color: var(--text); background-color: var(-
   .brand { grid-column: 1 / -1; grid-row: 1; justify-self: center; border: 0; padding: 10px 24px; }
   .nav { grid-row: 2; border-top: 1px solid var(--line); }
   .statusbar { grid-row: 2; border-top: 1px solid var(--line); overflow-x: auto; }
-  .user-text { display: none; }
   .side { top: 0; }
 }

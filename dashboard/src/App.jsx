@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useHub, HUB } from "./useHub.js";
 
 // ---------- settings you can edit ----------
-const USER = { name: "Siddharth", role: "Operator" };  // shown top right
 const CRITICAL_SCORE = 0.7;          // suspicious-activity score at or above this = critical pop-up
 const MUTE_AFTER_DISMISS_MS = 8000;  // no repeat pop-up for the same camera right after "Acknowledge"
 const NOTABLE_SCORE = 0.4;           // timeline ignores perceive/reason events scored below this
@@ -268,10 +267,6 @@ function Header({ tab, setTab, connected, bell, nodes }) {
           <span className="sb-val"><Clock /></span>
         </div>
         {bell}
-        <div className="sb-item operator">
-          <span className="avatar">{USER.name[0]}</span>
-          <div className="user-text"><b>{USER.name}</b><small>{USER.role}</small></div>
-        </div>
       </div>
     </header>
   );
@@ -352,14 +347,10 @@ function ControlBar({
       <button className="btn" onClick={() => run(() => trigger(`disk_full?cam=${selectedCam}`))}>
         Fill disk{selectedCam === "all" ? " · all" : ` · ${fmtCam(selectedCam)}`}
       </button>
-      <button className="btn" onClick={() => run(() => trigger(`auction?cam=${selectedCam}`), "Auction started. Watch the agent log.")}>
-  Run auction{selectedCam === "all" ? " · all" : ` · ${fmtCam(selectedCam)}`}
-   </button>
       <button className="btn" onClick={() => run(() => trigger(`toggle/${selectedCam}`))}>
         Toggle link{selectedCam === "all" ? " · all" : ` · ${fmtCam(selectedCam)}`}
       </button>
       <span className="ctl-spacer" />
-      <span className="ctl-note">Gemini reviews sampled frames. Configure GEMINI_API_KEY, restart the hub, then reload this page.</span>
       <button className="btn btn-outline-danger" onClick={() => run(() => trigger("reset"))}>Reset hub</button>
       {(message || videoSourcesError) && (
         <span className="ctl-feedback" role="status">{message || videoSourcesError}</span>
@@ -400,7 +391,7 @@ function MetricsStrip({ state }) {
   );
 }
 
-/* ---------- camera card: monitor on top, telemetry below, actions in a menu ---------- */
+
 function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onDiskFull, reportVideoFrames }) {
   const feedRef = useRef(null);
   const videoRef = useRef(null);
@@ -549,15 +540,15 @@ function CameraCard({ id, cam, credits, hosted, peerFreeMb, onToggle, onDiskFull
         {analysisError && <p className="analysis-error-details" role="status">{analysisError}</p>}
         <div className="row">
           <span>STORAGE</span>
-          <span className="mono">{cam.used_mb} / {cam.capacity_mb} MB · {pct}%</span>
+          <span className="mono">{cam.used_mb.toFixed(2)} / {cam.capacity_mb} MB · {pct}%</span>
         </div>
         <div className="bar">
           <div className={`bar-fill ${level}`} style={{ width: `${ownPct}%` }} />
           <div className="bar-fill host" style={{ width: `${hostPct}%` }} />
         </div>
         <div className="legend">
-          <span><i className={`lg ${level}`} />Own {ownMb} MB</span>
-          <span><i className="lg host" />Hosted {hostedMb} MB</span>
+          <span><i className={`lg ${level}`} />Own {ownMb.toFixed(2)} MB</span>
+          <span><i className="lg host" />Hosted {hostedMb.toFixed(2)} MB</span>
         </div>
 
         <div className="tele">
