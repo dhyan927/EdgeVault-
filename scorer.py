@@ -14,11 +14,23 @@ load_dotenv()
 # ============================================================
 DEMO_MODE = False
 
+_client_instance = None
+
 
 def _client():
+    """Return one shared Gemini client.
+
+    The client must stay referenced for as long as it is used. Building a new
+    genai.Client() inline (e.g. `_client().models.generate_content(...)`) lets
+    the Client object be garbage collected immediately, which closes its HTTP
+    connection and causes "Cannot send a request, as the client has been closed".
+    """
+    global _client_instance
     if not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"):
         raise RuntimeError("Set GEMINI_API_KEY before starting the hub.")
-    return genai.Client()
+    if _client_instance is None:
+        _client_instance = genai.Client()
+    return _client_instance
 
 
 def score_video_frames(b64_frames, context):
